@@ -131,6 +131,71 @@ struct SwiftBladeTests {
         #expect(output == "<html><body>PAGE(MIDDLE(BASE|))</body></html>")
     }
 
+    @Test("Loop shortcuts work without the loop. prefix")
+    func loopShortcuts() throws {
+        let users: [[String: Any]] = [["name": "Ada"], ["name": "Grace"], ["name": "Linus"]]
+        // Forma prática: sem `loop.` na frente.
+        let rendered = try renderer.renderString(
+            "@foreach(users as user){{ iteration }}. {{ user.name }}@if(!last), @endif@endforeach",
+            context: ["users": users]
+        )
+        #expect(rendered == "1. Ada, 2. Grace, 3. Linus")
+
+        let details = try renderer.renderString(
+            "@foreach(users as user)[{{ index }}/{{ count }}:{{ first ? 'F' : '-' }}{{ last ? 'L' : '-' }}:{{ remaining }}]@endforeach",
+            context: ["users": users]
+        )
+        #expect(details == "[0/3:F-:2][1/3:--:1][2/3:-L:0]")
+
+        // O prefixo `loop.` continua funcionando (compatibilidade).
+        let legacy = try renderer.renderString(
+            "@foreach(users as user){{ loop.iteration }}@endforeach",
+            context: ["users": users]
+        )
+        #expect(legacy == "123")
+
+        // Exemplo do pedido: sem numeração nenhuma também funciona.
+        let plain = try renderer.renderString(
+            "@foreach(users as user){{ user.name }};@endforeach",
+            context: ["users": users]
+        )
+        #expect(plain == "Ada;Grace;Linus;")
+    }
+
+    @Test("String interpolation and typed @swift declarations")
+    func interpolation() throws {
+        #expect(try renderer.renderString(
+            "{{ \"Olá \\(name), \\(count(items)) itens\" }}",
+            context: ["name": "Ada", "items": [1, 2, 3]]
+        ) == "Olá Ada, 3 itens")
+        // Aspas simples não interpolam, como em Swift.
+        #expect(try renderer.renderString("{{ 'Olá \\(name)' }}", context: ["name": "Ada"]) == "Olá \\(name)")
+        let typed = try renderer.renderString(
+            "@swift(let total: Int = count(items)){{ total }}",
+            context: ["items": [1, 2]]
+        )
+        #expect(typed == "2")
+    }
+
+    @Test("Template cache parses once and invalidates on change")
+    func templateCache() throws {
+        let root = URL(fileURLWithPath: "/tmp/swiftra-cache-\(UUID().uuidString)/")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("cached.blade.html")
+        try "v1 {{ name }}".write(to: file, atomically: true, encoding: .utf8)
+
+        let diskRenderer = SwiftBladeRenderer(rootDirectory: root.path + "/")
+        #expect(try diskRenderer.render(view: "cached", context: ["name": "Ada"]) == "v1 Ada")
+        #expect(try diskRenderer.render(view: "cached", context: ["name": "Grace"]) == "v1 Grace")
+
+        // Nova mtime + conteúdo: o cache é invalidado.
+        try "v2 {{ name }}".write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: file.path)
+        #expect(try diskRenderer.render(view: "cached", context: ["name": "Ada"]) == "v2 Ada")
+    }
+
     @Test("compact accepts unlimited pairs")
     func compactUnlimited() throws {
         let data = compact(

@@ -124,6 +124,23 @@ struct PolymorphicTests {
             try moved.setMorphParent(user)
             try await moved.save(on: app.db)
             #expect(try await user.morphMany(Comment.self, on: app.db).count == 2)
+
+            // morphOne + morphParentOrFail.
+            #expect(try await post.morphOne(Comment.self, on: app.db) != nil)
+            #expect(try await comment.morphParentOrFail(Post.self, on: app.db).title == "Morph Post")
+            await #expect(throws: EloquentError.self) {
+                _ = try await comment.morphParentOrFail(User.self, on: app.db)
+            }
+
+            // Morph map: o tipo passa a ser gravado pelo alias.
+            MorphRegistry.shared.morphMap { registry in
+                registry.register(Post.self, as: "post")
+            }
+            #expect(Post.morphType == "post")
+            try await Comment(body: "alias", parent: post).save(on: app.db)
+            let aliasComment = try #require(try await Comment.on(app.db).where("body", "alias").first())
+            #expect(aliasComment.commentableType == "post")
+            #expect((try await aliasComment.morphParent(on: app.db) as? Post)?.id == post.id)
         }
     }
 }
@@ -142,6 +159,47 @@ struct DatabaseRateLimiterTests {
             #expect(try await DatabaseRateLimiter.remaining(on: app.db, key: "login:test", maxAttempts: 2) == 0)
             // Outra chave não é afetada.
             #expect(try await DatabaseRateLimiter.hit(on: app.db, key: "login:other", maxAttempts: 2, decaySeconds: 60) == nil)
+
+            // pruneExpired remove só as janelas vencidas.
+            _ = try await DatabaseRateLimiter.hit(
+                on: app.db, key: "login:expired", maxAttempts: 2, decaySeconds: 60,
+                now: Date().addingTimeInterval(-120))
+            #expect(try await DatabaseRateLimiter.pruneExpired(on: app.db) == 1)
+            #expect(try await RateLimitEntry.on(app.db).where("key", "login:test").first() != nil)
+        }
+    }
+}
+
+@Suite("Typed relation queries")
+struct TypedRelationTests {
+    @Test("whereHas, has, doesntHave and typed relation joins")
+    func relations() async throws {
+        try await withSwiftraApp { app in
+            let author = User(name: "Author", email: "author@example.com")
+            try await author.save(on: app.db)
+            let reader = User(name: "Reader", email: "reader@example.com")
+            try await reader.save(on: app.db)
+            try await Post(userId: try #require(author.id), title: "Swift Tips").save(on: app.db)
+            try await Post(userId: try #require(author.id), title: "Other").save(on: app.db)
+
+            let withSwift = try await User.on(app.db)
+                .whereHas(\.$posts) { $0.where(\.$title, "Swift Tips") }
+                .get()
+            #expect(withSwift.map(\.email) == ["author@example.com"])
+
+            #expect(try await User.on(app.db).has(\.$posts).count() == 1)
+            #expect(try await User.on(app.db).doesntHave(\.$posts).first()?.email == "reader@example.com")
+
+            // Join tipado pela relação @Parent, sem strings de coluna.
+            let joined = try await Post.on(app.db)
+                .join(parent: \.$user)
+                .get()
+            #expect(joined.count == 2)
+
+            let paged = try await User.on(app.db)
+                .whereHas(\.$posts)
+                .paginate(page: 1, perPage: 10)
+            #expect(paged.total == 1)
         }
     }
 }

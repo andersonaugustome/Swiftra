@@ -7,9 +7,9 @@
   <p>{{ total }} usuário(s) cadastrado(s).</p>
   @forelse(user in users)
     <article>
-      <strong>{{ loop.iteration }}. {{ user.name }}</strong>
+      <strong>{{ iteration }}. {{ user.name }}</strong>
       <span>{{ user.email }}</span>
-      @if(loop.first)<em>primeiro</em>@endif
+      @if(first)<em>primeiro</em>@endif
     </article>
   @empty
     <p>Nenhum usuário cadastrado.</p>

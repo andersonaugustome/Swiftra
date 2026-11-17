@@ -383,7 +383,7 @@ Valores interpolados com `{{ }}` são escapados para HTML; `{!! !!}` imprime sem
 @section('content')
   @if(user) Olá, {{ user.name }} @else Convidado @endif
   @foreach(users as user)
-    {{ loop.iteration }}. {{ user.name }} ({{ user.email }})
+    {{ iteration }}. {{ user.name }} ({{ user.email }})
   @empty
     Nenhum usuário.
   @endforeach
@@ -392,7 +392,7 @@ Valores interpolados com `{{ }}` são escapados para HTML; `{!! !!}` imprime sem
 @endsection
 ```
 
-Suportadas: `@swift` (declarações `let`/`var` no template), `@if/@elseif/@else`, `@unless`, `@isset`, `@empty`, `@foreach` (`users as user`, `key => user` ou `user in users`, com `loop.index/iteration/first/last/count`), `@forelse`, `@switch/@case/@default/@break`, `@break/@continue`, `@extends/@section/@yield/@parent`, `@include` (com dados extras), `@component`, `<x-nome>` com atributos (`:prop` amarrado) e `<x-slot>`, `@push/@stack`, `@auth/@guest`, `@csrf`, `@method('PUT')`, comentários `{{-- --}}` e `@verbatim`. Expressões aceitam comparações, `&&`/`||`/`!`, `??`, ternário, funções como `count()`, `upper()` e `isset()` e métodos sobre valores (`user.name.uppercased()`, `items.count()`, `tags.join(', ')`, encadeados). `@parent` funciona em cadeias de layouts com qualquer profundidade.
+Suportadas: `@swift` (declarações `let`/`var` no template), `@if/@elseif/@else`, `@unless`, `@isset`, `@empty`, `@foreach` (`users as user`, `key => user` ou `user in users`, com `iteration`, `index`, `first`, `last`, `count` e `remaining` diretos — sem o prefixo `loop.`, que continua aceito), `@forelse`, `@switch/@case/@default/@break`, `@break/@continue`, `@extends/@section/@yield/@parent`, `@include` (com dados extras), `@component`, `<x-nome>` com atributos (`:prop` amarrado) e `<x-slot>`, `@push/@stack`, `@auth/@guest`, `@csrf`, `@method('PUT')`, comentários `{{-- --}}` e `@verbatim`. Expressões aceitam comparações, `&&`/`||`/`!`, `??`, ternário, funções como `count()`, `upper()` e `isset()` e métodos sobre valores (`user.name.uppercased()`, `items.count()`, `tags.join(', ')`, encadeados). `@parent` funciona em cadeias de layouts com qualquer profundidade.
 
 Código no template usa a sintaxe Swift, sem `$` nem PHP:
 
@@ -405,9 +405,15 @@ Código no template usa a sintaxe Swift, sem `$` nem PHP:
 <h1>{{ titulo }}</h1>
 <p>{{ total }} registro(s).</p>
 
-{{-- Forma curta, em uma linha: --}}
-@swift(let dobro = total * 2)
+{{-- Forma curta, em uma linha (anotação de tipo é aceita): --}}
+@swift(let dobro: Int = total * 2)
+
+{{-- Interpolação estilo Swift em strings com aspas duplas: --}}
+{{ "Olá \\(user.name), você tem \\(count(posts)) posts" }}
 ```
+
+Templates de arquivo são parseados uma única vez e mantidos em cache
+(invalidados quando o arquivo muda no disco).
 
 ## Models e Eloquent
 
@@ -555,6 +561,16 @@ let simple = try await User.simplePaginate(page: 1, perPage: 15) // sem count
 
 `GET /api/users?page=1&per_page=15&search=ana` usa essa paginação.
 
+### Joins tipados e `whereHas`
+
+```swift
+let posts = try await Post.join(parent: \.$user).get()       // @Parent
+let users = try await User.join(children: \.$posts).get()   // @Children
+let autores = try await User.whereHas(\.$posts) {
+    $0.where(\.$title, "Swift")
+}.get() // também: has(\.$posts) e doesntHave(\.$posts)
+```
+
 ### Eager loading e relações declarativas
 
 ```swift
@@ -581,8 +597,16 @@ Crie novas com `swift run Swiftra make:factory NomeFactory`.
 MorphRegistry.register(User.self) // em configure.swift
 
 let comments = try await post.morphMany(Comment.self, on: database)
+let first = try await post.morphOne(Comment.self, on: database)
 let parent = try await comment.morphParent(Post.self, on: database)
+let parentOrFail = try await comment.morphParentOrFail(Post.self, on: database)
 let anyParent = try await comment.morphParent(on: database) // via registro
+
+// Morph map (tipos gravados por alias, como no Laravel):
+MorphRegistry.shared.morphMap { registry in
+    registry.register(Post.self, as: "post")
+    registry.register(User.self, as: "user")
+}
 ```
 
 ### Acesso total ao Fluent
@@ -776,7 +800,7 @@ curl -X POST http://127.0.0.1:8080/api/auth/logout \
   -H 'authorization: Bearer SEU_TOKEN'
 ```
 
-Após o `204`, o mesmo token retorna `401` em rotas protegidas. `logout` aceita um corpo opcional `{"refresh_token": "..."}` para encerrar também a sessão longa; `logout-all` revoga todos os dispositivos. Redefinir a senha também revoga todas as sessões.
+Após o `204`, o mesmo token retorna `401` em rotas protegidas. `throttle:prune` remove as janelas expiradas do driver database. `logout` aceita um corpo opcional `{"refresh_token": "..."}` para encerrar também a sessão longa; `logout-all` revoga todos os dispositivos. Redefinir a senha também revoga todas as sessões.
 
 ### Recuperação de senha, verificação de email e MFA
 
@@ -867,6 +891,8 @@ Execute comandos com `swift run Swiftra <comando>`.
 | `make:migration Nome` | Cria uma migration vazia. |
 | `make:factory NomeFactory` | Cria uma factory de model. |
 | `db:seed` | Cria papéis/permissões padrão (admin/user). |
+| `throttle:prune` | Remove janelas expiradas do rate limiting (driver database). |
+| `mail:test email` | Envia um email de teste pelo mailer configurado. |
 
 Exemplos:
 
@@ -1055,24 +1081,28 @@ Nenhuma limitação funcional aberta no escopo do scaffold. Os pontos que
 existiam nas primeiras versões foram corrigidos:
 
 - **SwiftBlade completo**: layouts multinível com `@parent` encadeado, `@swift`
-  com atribuições, métodos sobre valores (`user.name.uppercased()`,
-  `items.count()`, `tags.join(', ')`, chamadas encadeadas) e todas as
-  diretivas de loop/condição/include/componente.
+  com `let`/`var` (inclusive tipado), métodos sobre valores
+  (`user.name.uppercased()`, `items.count()`, `tags.join(', ')`, chamadas
+  encadeadas), interpolação `\\(nome)` em strings e cache de templates
+  parseados com invalidação por modificação do arquivo.
 - **Colunas e operadores**: além das strings (validadas com `EloquentError`,
   sem derrubar o processo), há superfície totalmente tipada — `QueryOperator`,
   `SortDirection` e overloads por key path para `where/whereIn/whereNotIn/
   whereNull/whereNotNull/whereBetween/whereColumn/orderBy`.
-- **Relações polimórficas**: `morphMany`/`morphTo` com registro de tipos
-  (`MorphRegistry`), exemplificadas por `Comment` sobre `User`/`Post`.
+- **Relações polimórficas**: `morphMany`/`morphOne`/`morphTo`/
+  `morphParentOrFail` com registro de tipos (`MorphRegistry`) e morph map
+  com aliases, exemplificadas por `Comment` sobre `User`/`Post`.
 - **Rate limiting compartilhado**: driver `database` por padrão
-  (`rate_limit_entries`, válido entre instâncias); `memory` segue disponível
-  para processo único/testes via `RATE_LIMIT_DRIVER`.
+  (`rate_limit_entries`, válido entre instâncias) com limpeza de expirados
+  via `throttle:prune`; `memory` segue disponível para processo único/testes
+  via `RATE_LIMIT_DRIVER`.
 - **Email real**: `MAIL_MAILER=smtp` usa o `SMTPMailer` (NIO + NIOSSL, com
-  `none`/`starttls`/`tls` e `AUTH LOGIN`); `log` continua como padrão de
-  desenvolvimento.
-- **MySQL no fluxo padrão**: `make test` roda a suíte SQLite e, havendo
-  MySQL acessível, a integração real; o CI executa o job MySQL 8.4 em todo
-  push/PR mesmo sem servidor local.
+  `none`/`starttls`/`tls`, `AUTH LOGIN`, HTML via `Mail.sendHTML` e
+  `MAIL_TLS_VERIFY` configurável); `mail:test` valida a configuração e `log`
+  continua como padrão de desenvolvimento.
+- **MySQL no fluxo padrão**: `make test` roda a suíte SQLite e a integração
+  real — com servidor acessível, com docker subindo o MySQL, ou no CI
+  (job MySQL 8.4 em todo push/PR).
 
 Decisões conscientes que permanecem (não são defeitos): expressões Blade não
 não são PHP: o bloco de código do template é o `@swift`, com declarações

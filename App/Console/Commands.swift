@@ -8,6 +8,37 @@ public func registerCommands(_ app: Application) {
     app.asyncCommands.use(MakeMigrationCommand(), as: "make:migration")
     app.asyncCommands.use(MakeFactoryCommand(), as: "make:factory")
     app.asyncCommands.use(SeedCommand(), as: "db:seed")
+    app.asyncCommands.use(ThrottlePruneCommand(), as: "throttle:prune")
+    app.asyncCommands.use(MailTestCommand(), as: "mail:test")
+}
+
+struct ThrottlePruneCommand: AsyncCommand {
+    struct Signature: CommandSignature {}
+    var help: String { "Remove expired rate limit windows (database driver)" }
+
+    func run(using context: CommandContext, signature: Signature) async throws {
+        let removed = try await DatabaseRateLimiter.pruneExpired(on: context.application.db)
+        context.console.success("Removed \(removed) expired rate limit entries")
+    }
+}
+
+struct MailTestCommand: AsyncCommand {
+    struct Signature: CommandSignature {
+        @Argument(name: "email", help: "Destination email address")
+        var email: String
+    }
+
+    var help: String { "Send a test email using the configured mailer" }
+
+    func run(using context: CommandContext, signature: Signature) async throws {
+        try await Mail.send(
+            to: signature.email,
+            subject: "Swiftra mail test",
+            body: "Se você recebeu este email, o mailer do Swiftra está funcionando.\nMailer: \(MailConfig.mailer)",
+            logger: context.application.logger
+        )
+        context.console.success("Test email sent to \(signature.email) via \(MailConfig.mailer)")
+    }
 }
 
 struct SeedCommand: AsyncCommand {

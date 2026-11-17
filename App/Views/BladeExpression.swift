@@ -68,9 +68,13 @@ enum BladeExpression {
         for rawComponent in path.split(separator: ".", omittingEmptySubsequences: false).map(String.init) {
             let component = rawComponent.trimmingCharacters(in: .whitespaces)
             if let dictionary = current as? [String: Any] {
+                // Chave real tem precedência sobre as pseudo-propriedades.
+                if let next = dictionary[component] {
+                    current = next
+                    continue
+                }
                 if component == "count" || component == "length" { return dictionary.count }
-                guard let next = dictionary[component] else { return nil }
-                current = next
+                return nil
             } else if let array = current as? [Any] {
                 if component == "count" || component == "length" { return array.count }
                 if component == "first" { return array.first as Any? }
@@ -94,6 +98,38 @@ enum BladeExpression {
         return stringify(lhs) == stringify(rhs)
     }
 
+
+
+    /// Interpolação estilo Swift dentro de strings com aspas duplas:
+    /// `"Olá \\(name), você tem \\(count(items)) itens"`.
+    static func interpolate(_ value: String, in context: [String: Any]) -> String {
+        guard value.contains("\\(") else { return value }
+        var output = ""
+        let chars = Array(value)
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "\\", i + 1 < chars.count, chars[i + 1] == "(" {
+                var depth = 0
+                var j = i + 1
+                var expression = ""
+                while j < chars.count {
+                    if chars[j] == "(" { depth += 1; if depth > 1 { expression.append(chars[j]) } }
+                    else if chars[j] == ")" {
+                        depth -= 1
+                        if depth == 0 { break }
+                        expression.append(chars[j])
+                    } else { expression.append(chars[j]) }
+                    j += 1
+                }
+                output += stringify(evaluate(expression, in: context))
+                i = j + 1
+            } else {
+                output.append(chars[i])
+                i += 1
+            }
+        }
+        return output
+    }
 
     /// Métodos chamáveis sobre valores: `user.name.uppercased()`,
     /// `items.count()`, `name.contains('a')`, `tags.join(', ')`.
@@ -166,7 +202,7 @@ enum BladeExpression {
 
     private enum Token: Equatable {
         case number(Double)
-        case string(String)
+        case string(String, interpolated: Bool)
         case identifier(String)
         case op(String)
         case lParen, rParen, comma, question, colon
@@ -183,10 +219,23 @@ enum BladeExpression {
                 var j = i + 1
                 var value = ""
                 while j < chars.count && chars[j] != ch {
-                    if chars[j] == "\\", j + 1 < chars.count { j += 1 }
+                    if chars[j] == "\\", j + 1 < chars.count {
+                        // Aspas simples preservam a barra (só escapam a própria aspa).
+                        if ch == "'" && chars[j + 1] != "'" {
+                            value.append(chars[j]); j += 1
+                            continue
+                        }
+                        // Preserva `\\(` para a interpolação em aspas duplas.
+                        if chars[j + 1] == "(" && ch == "\"" {
+                            value += "\\("
+                            j += 2
+                            continue
+                        }
+                        j += 1
+                    }
                     value.append(chars[j]); j += 1
                 }
-                tokens.append(.string(value)); i = j + 1; continue
+                tokens.append(.string(value, interpolated: ch == "\"")); i = j + 1; continue
             }
             if ch.isNumber || (ch == "-" && i + 1 < chars.count && chars[i + 1].isNumber && (tokens.last.map(isValueEnd) != true)) {
                 var j = i
@@ -353,7 +402,8 @@ enum BladeExpression {
             guard let token = advance() else { return nil }
             switch token {
             case .number(let value): return parseChained(value)
-            case .string(let value): return parseChained(value)
+            case .string(let value, let interpolated):
+                return parseChained(interpolated ? BladeExpression.interpolate(value, in: context) : value)
             case .lParen:
                 let value = parseTernary()
                 if peek() == .rParen { _ = advance() }

@@ -30,6 +30,15 @@ public enum Mail {
         )
     }
 
+    /// Email HTML: usa `text/html` no SMTP; no mailer de log, registra o HTML.
+    public static func sendHTML(to email: String, subject: String, html: String, logger: Logger) async throws {
+        if let smtp = mailer as? SMTPMailer {
+            try await smtp.send(to: email, subject: subject, body: html, isHTML: true, logger: logger)
+        } else {
+            try await send(to: email, subject: subject, body: html, logger: logger)
+        }
+    }
+
     public static func sendPasswordReset(to email: String, token: String, logger: Logger) async throws {
         let url = "\(AppConfig.url)/reset-password?token=\(token)&email=\(email)"
         try await send(

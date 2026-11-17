@@ -114,6 +114,13 @@ struct SMTPMailerTests {
             body: "First line\n.second line dot-stuffed",
             logger: logger
         )
+        try await mailer.send(
+            to: "dest@example.com",
+            subject: "HTML mail",
+            body: "<h1>Olá</h1>",
+            isHTML: true,
+            logger: logger
+        )
 
         let lines = recorder.lines
         #expect(lines.contains { $0.hasPrefix("EHLO swiftra.test") })
@@ -123,7 +130,9 @@ struct SMTPMailerTests {
         #expect(lines.contains("DATA-LINE: Subject: Hello SMTP"))
         #expect(lines.contains("DATA-LINE: First line"))
         #expect(lines.contains("DATA-LINE: ..second line dot-stuffed"))
-        #expect(lines.contains("QUIT"))
+        #expect(lines.contains("DATA-LINE: Content-Type: text/html; charset=utf-8"))
+        #expect(lines.contains("DATA-LINE: <h1>Olá</h1>"))
+        #expect(lines.filter { $0 == "QUIT" }.count == 2)
     }
 
     @Test("MAIL_MAILER=smtp selects the SMTP mailer")

@@ -73,6 +73,18 @@ public enum DatabaseRateLimiter {
         return max(Int(entry.expiresAt.timeIntervalSince(now).rounded(.up)), 1)
     }
 
+    /// Remove janelas expiradas. Retorna quantas linhas foram apagadas.
+    @discardableResult
+    public static func pruneExpired(on database: any Database, now: Date = Date()) async throws -> Int {
+        let expired = try await RateLimitEntry.on(database)
+            .where("expires_at", "<=", now)
+            .get()
+        for entry in expired {
+            try await entry.delete(on: database)
+        }
+        return expired.count
+    }
+
     public static func remaining(on database: any Database, key: String, maxAttempts: Int) async throws -> Int {
         guard let entry = try await RateLimitEntry.on(database).where("key", key).first(),
               entry.expiresAt > Date() else { return maxAttempts }

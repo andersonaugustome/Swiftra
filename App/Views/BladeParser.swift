@@ -471,7 +471,10 @@ enum BladeParser {
             guard let range = statement.range(of: "=") else { return nil }
             let after = statement[range.upperBound...]
             guard !after.hasPrefix("=") else { return nil }
-            let name = statement[..<range.lowerBound].trimmingCharacters(in: .whitespaces)
+            // Anotação de tipo Swift é aceita e ignorada: `let total: Int = ...`
+            let name = statement[..<range.lowerBound]
+                .split(separator: ":").first
+                .map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
             guard name.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else { return nil }
             return (name, after.trimmingCharacters(in: .whitespaces))
         }

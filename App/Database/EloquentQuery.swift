@@ -304,6 +304,10 @@ public extension EloquentQuery where M: SoftDeletableModel {
 public struct EloquentQuery<M: Model>: @unchecked Sendable {
     final class State: @unchecked Sendable {
         var recordedError: (any Error)?
+        var deferredIncludedIDs: [() async throws -> [M.IDValue]] = []
+        var deferredExcludedIDs: [() async throws -> [M.IDValue]] = []
+        var deferredApplied = false
+        var forceEmpty = false
     }
 
     private let state = State()
@@ -321,6 +325,31 @@ public struct EloquentQuery<M: Model>: @unchecked Sendable {
 
     private func validate() throws {
         if let error = state.recordedError { throw error }
+    }
+
+    /// Resolve os `whereHas` pendentes para filtros de ID. `false` = resultado vazio garantido.
+    @discardableResult
+    private func prepareDeferred() async throws -> Bool {
+        try validate()
+        if state.deferredApplied { return !state.forceEmpty }
+        state.deferredApplied = true
+        let idField = DatabaseQuery.Field.extendedPath(
+            [.id], schema: M.schemaOrAlias, space: M.spaceIfNotAliased)
+        for provider in state.deferredIncludedIDs {
+            let ids = Array(Set(try await provider()))
+            if ids.isEmpty {
+                state.forceEmpty = true
+                return false
+            }
+            builder.filter(idField, .subset(inverse: false), .array(ids.map { .bind($0) }))
+        }
+        for provider in state.deferredExcludedIDs {
+            let ids = Array(Set(try await provider()))
+            if !ids.isEmpty {
+                builder.filter(idField, .subset(inverse: true), .array(ids.map { .bind($0) }))
+            }
+        }
+        return true
     }
 
     // MARK: where
@@ -573,6 +602,75 @@ public struct EloquentQuery<M: Model>: @unchecked Sendable {
         leftJoin(model, firstColumn, "=", secondColumn)
     }
 
+    // MARK: joins tipados por relação e whereHas
+
+    /// Join pela relação `@Parent`, sem strings: `Post.query().join(parent: \.$user)`.
+    @discardableResult
+    public func join<To>(parent relation: KeyPath<M, ParentProperty<M, To>>) -> Self {
+        builder.join(parent: relation)
+        return self
+    }
+
+    /// Join pela relação `@Children`: `User.query().join(children: \.$posts)`.
+    @discardableResult
+    public func join<To>(children relation: KeyPath<M, ChildrenProperty<M, To>>) -> Self {
+        builder.join(children: relation)
+        return self
+    }
+
+    /// Join pela relação `@Siblings`: `User.query().join(siblings: \.$roles)`.
+    @discardableResult
+    public func join<To, Through>(siblings relation: KeyPath<M, SiblingsProperty<M, To, Through>>) -> Self {
+        builder.join(siblings: relation)
+        return self
+    }
+
+    /// `whereHas(\.$posts) { $0.where(\.$title, "Swift") }` estilo Laravel.
+    ///
+    /// A subconsulta é resolvida para IDs no primeiro método terminal,
+    /// sem gerar duplicatas no resultado.
+    @discardableResult
+    public func whereHas<Child>(
+        _ relation: KeyPath<M, ChildrenProperty<M, Child>>,
+        _ constraint: @escaping @Sendable (EloquentQuery<Child>) -> EloquentQuery<Child> = { $0 }
+    ) -> Self where Child: EloquentModel {
+        let database = builder.database
+        state.deferredIncludedIDs.append {
+            let children = try await constraint(Child.on(database)).get()
+            let relationInstance = M()[keyPath: relation]
+            switch relationInstance.parentKey {
+            case .required(let parentKey):
+                return children.map { $0[keyPath: parentKey].id }
+            case .optional(let parentKey):
+                return children.compactMap { $0[keyPath: parentKey].id }
+            }
+        }
+        return self
+    }
+
+    /// Atalho de existência: `User.query().has(\.$posts)`.
+    @discardableResult
+    public func has<Child>(_ relation: KeyPath<M, ChildrenProperty<M, Child>>) -> Self where Child: EloquentModel {
+        whereHas(relation)
+    }
+
+    /// Inverso de `has`: somente quem não tem filhos na relação.
+    @discardableResult
+    public func doesntHave<Child>(_ relation: KeyPath<M, ChildrenProperty<M, Child>>) -> Self where Child: EloquentModel {
+        let database = builder.database
+        state.deferredExcludedIDs.append {
+            let children = try await Child.on(database).get()
+            let relationInstance = M()[keyPath: relation]
+            switch relationInstance.parentKey {
+            case .required(let parentKey):
+                return children.map { $0[keyPath: parentKey].id }
+            case .optional(let parentKey):
+                return children.compactMap { $0[keyPath: parentKey].id }
+            }
+        }
+        return self
+    }
+
     // MARK: eager loading e ordenação
 
     /// Eager loading declarativo do Fluent: `User.query().with(\.$posts)`.
@@ -661,7 +759,7 @@ public struct EloquentQuery<M: Model>: @unchecked Sendable {
     // MARK: terminais
 
     public func first() async throws -> M? {
-        try validate()
+        guard try await prepareDeferred() else { return nil }
         return try await builder.first()
     }
 
@@ -682,7 +780,7 @@ public struct EloquentQuery<M: Model>: @unchecked Sendable {
     }
 
     public func get() async throws -> [M] {
-        try validate()
+        guard try await prepareDeferred() else { return [] }
         return try await builder.all()
     }
 
@@ -719,7 +817,7 @@ public struct EloquentQuery<M: Model>: @unchecked Sendable {
     }
 
     public func count() async throws -> Int {
-        try validate()
+        guard try await prepareDeferred() else { return 0 }
         return try await builder.count()
     }
 
@@ -880,7 +978,9 @@ public struct EloquentQuery<M: Model>: @unchecked Sendable {
 public extension EloquentQuery where M: Content {
     /// Paginação no formato do Laravel (`data`, `current_page`, `last_page`...).
     func paginate(page: Int = 1, perPage: Int = 15) async throws -> Paginator<M> {
-        try validate()
+        guard try await prepareDeferred() else {
+            return Paginator(data: [], currentPage: page, perPage: perPage, total: 0)
+        }
         guard page >= 1, perPage >= 1, perPage <= 500 else {
             throw EloquentError.invalidPagination(page: page, perPage: perPage)
         }
@@ -890,7 +990,9 @@ public extension EloquentQuery where M: Content {
 
     /// Como `paginate`, sem contar o total (uma query a menos).
     func simplePaginate(page: Int = 1, perPage: Int = 15) async throws -> SimplePaginator<M> {
-        try validate()
+        guard try await prepareDeferred() else {
+            return SimplePaginator(data: [], currentPage: page, perPage: perPage, hasMorePages: false)
+        }
         guard page >= 1, perPage >= 1, perPage <= 500 else {
             throw EloquentError.invalidPagination(page: page, perPage: perPage)
         }

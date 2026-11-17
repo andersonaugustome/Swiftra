@@ -24,7 +24,11 @@ public protocol PolymorphicParent: EloquentModel {
 }
 
 public extension PolymorphicParent {
-    static var morphType: String { String(describing: Self.self) }
+    /// Nome do tipo, ou o alias definido no morph map (`MorphRegistry.morphMap`).
+    static var morphType: String {
+        MorphRegistry.shared.alias(forTypeName: String(describing: Self.self))
+            ?? String(describing: Self.self)
+    }
 }
 
 /// Lado "filho": a model que carrega `*_type`/`*_id`.
@@ -55,6 +59,14 @@ public extension PolymorphicParent {
             .where(Child.morphTypeField, Self.morphType)
             .where(Child.morphIDField, try requireID())
             .get()
+    }
+
+    /// O primeiro filho da relação: `morphOne(Comment.self)`.
+    func morphOne<Child: PolymorphicChild>(
+        _ child: Child.Type,
+        on database: any Database
+    ) async throws -> Child? {
+        try await morphManyQuery(child, on: database).first()
     }
 
     /// Query encadeável equivalente, para filtrar/ordenar/paginar.
@@ -88,6 +100,17 @@ public extension PolymorphicChild {
     func morphParent(on database: any Database) async throws -> (any PolymorphicParent)? {
         try await MorphRegistry.shared.resolve(type: morphTypeValue, id: morphIDValue, on: database)
     }
+
+    /// Como `morphParent(_:on:)`, mas lança 404 quando não resolve.
+    func morphParentOrFail<Parent: PolymorphicParent>(
+        _ parent: Parent.Type,
+        on database: any Database
+    ) async throws -> Parent where Parent.IDValue == UUID {
+        guard let resolved = try await morphParent(parent, on: database) else {
+            throw EloquentError.modelNotFound(Parent.morphType)
+        }
+        return resolved
+    }
 }
 
 // MARK: - Registro de tipos
@@ -96,13 +119,46 @@ public final class MorphRegistry: @unchecked Sendable {
     public static let shared = MorphRegistry()
 
     private var resolvers: [String: (UUID, any Database) async throws -> (any PolymorphicParent)?] = [:]
+    private var aliases: [String: String] = [:]
     private let lock = NSLock()
 
     public init() {}
 
-    public func register<Parent: PolymorphicParent>(_ parent: Parent.Type) where Parent.IDValue == UUID {
+    /// Morph map estilo Laravel:
+    /// ```swift
+    /// MorphRegistry.shared.morphMap { registry in
+    ///     registry.register(Post.self, as: "post")
+    ///     registry.register(User.self, as: "user")
+    /// }
+    /// ```
+    /// Com o alias, `commentable_type` grava `post` em vez de `Post`.
+    public func morphMap(_ build: (MorphRegistry) -> Void) {
+        build(self)
+    }
+
+    /// Registra o tipo também sob um alias (chave do morph map).
+    public func register<Parent: PolymorphicParent>(
+        _ parent: Parent.Type,
+        as alias: String
+    ) where Parent.IDValue == UUID {
         lock.withLock {
-            resolvers[Parent.morphType] = { id, database in
+            aliases[String(describing: Parent.self)] = alias
+            resolvers[alias] = { id, database in
+                try await Parent.find(id, on: database)
+            }
+        }
+    }
+
+    public func alias(forTypeName name: String) -> String? {
+        lock.withLock { aliases[name] }
+    }
+
+    public func register<Parent: PolymorphicParent>(_ parent: Parent.Type) where Parent.IDValue == UUID {
+        // Fora do lock: `morphType` consulta `alias()`, que também usa o lock
+        // (NSLock não é reentrante).
+        let key = Parent.morphType
+        lock.withLock {
+            resolvers[key] = { id, database in
                 try await Parent.find(id, on: database)
             }
         }

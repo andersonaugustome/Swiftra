@@ -67,22 +67,58 @@ public enum SwiftBladeError: Error, CustomStringConvertible {
 
 // MARK: - Engine
 
+/// Cache de templates já parseados (chave: caminho + data de modificação).
+/// Requisições repetidas não repetem tokenização/parser do mesmo arquivo.
+final class BladeTemplateCache: @unchecked Sendable {
+    static let shared = BladeTemplateCache()
+
+    private var entries: [String: (modified: Date, nodes: [BladeNode])] = [:]
+    private let lock = NSLock()
+
+    public init() {}
+
+    func nodes(forFile path: String, template: String) -> [BladeNode] {
+        let modified = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+        return lock.withLock {
+            if let modified, let entry = entries[path], entry.modified == modified {
+                return entry.nodes
+            }
+            let nodes = BladeParser.parse(template)
+            if let modified {
+                entries[path] = (modified, nodes)
+            }
+            return nodes
+        }
+    }
+
+    func clear() {
+        lock.withLock { entries = [:] }
+    }
+}
+
+
 struct BladeEngine {
     let rootDirectory: String
 
-    func load(view name: String) throws -> String {
+    func path(forView name: String) -> String {
         let relativePath = name.hasSuffix(".blade.html")
             ? name
             : name.replacingOccurrences(of: ".", with: "/") + ".blade.html"
-        let path = rootDirectory + relativePath
-        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else {
+        return rootDirectory + relativePath
+    }
+
+    func load(view name: String) throws -> String {
+        guard let contents = try? String(contentsOfFile: path(forView: name), encoding: .utf8) else {
             throw SwiftBladeError.viewNotFound(name)
         }
         return contents
     }
 
     func render(view name: String, context: [String: Any]) throws -> String {
-        try renderString(load(view: name), context: context)
+        var state = RenderState()
+        let template = try load(view: name)
+        let nodes = BladeTemplateCache.shared.nodes(forFile: path(forView: name), template: template)
+        return stripParentPlaceholders(try render(nodes: nodes, context: context, state: &state))
     }
 
     func renderString(_ template: String, context: [String: Any]) throws -> String {
@@ -114,7 +150,11 @@ struct BladeEngine {
     enum Flow { case breakLoop, continueLoop }
 
     func render(template: String, context: [String: Any], state: inout RenderState) throws -> String {
-        let nodes = BladeParser.parse(template)
+        try render(nodes: BladeParser.parse(template), context: context, state: &state)
+    }
+
+    func render(nodes: [BladeNode], context: [String: Any], state: inout RenderState) throws -> String {
+        let nodes = nodes
 
         // Layout: @extends coleta as seções e renderiza o layout.
         if let extendsIndex = nodes.firstIndex(where: { if case .extends = $0 { return true }; return false }),
@@ -290,14 +330,22 @@ struct BladeEngine {
             var loopContext = context
             loopContext[variable] = item.element
             if let indexVariable { loopContext[indexVariable] = item.index }
-            loopContext["loop"] = [
+            let loop: [String: Any] = [
                 "index": offset,
                 "iteration": offset + 1,
                 "count": items.count,
                 "first": offset == 0,
                 "last": offset == items.count - 1,
                 "remaining": items.count - offset - 1,
-            ] as [String: Any]
+            ]
+            loopContext["loop"] = loop
+            // Atalhos práticos: `{{ iteration }}`, `{{ index }}`, `{{ first }}`,
+            // `{{ last }}`, `{{ count }}`, `{{ remaining }}` — sem o prefixo `loop.`.
+            // Eles sombreiam variáveis externas homônimas apenas dentro do loop;
+            // em loops aninhados vale sempre o loop mais interno.
+            for (key, value) in loop where key != variable && key != indexVariable {
+                loopContext[key] = value
+            }
             output += try renderNodes(body, context: loopContext, state: &state)
             if state.flow == .breakLoop {
                 state.flow = nil

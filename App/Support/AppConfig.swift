@@ -91,4 +91,8 @@ public enum MailConfig {
     public static var smtpPassword: String? { Environment.get("MAIL_PASSWORD") }
     /// `none`, `starttls` (padrão) ou `tls` (implícito, porta 465).
     public static var smtpEncryption: String { Environment.get("MAIL_ENCRYPTION") ?? "starttls" }
+    /// Verificação do certificado TLS (`MAIL_TLS_VERIFY=false` só para dev).
+    public static var smtpVerifyTLS: Bool {
+        (Environment.get("MAIL_TLS_VERIFY") ?? "true").lowercased() != "false"
+    }
 }

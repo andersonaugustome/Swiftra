@@ -26,6 +26,7 @@ public struct SMTPMailer: Mailer {
     public let username: String?
     public let password: String?
     public let encryption: SMTPEncryption
+    public let verifyTLS: Bool
     public let fromAddress: String
     public let clientName: String
 
@@ -35,6 +36,7 @@ public struct SMTPMailer: Mailer {
         username: String? = nil,
         password: String? = nil,
         encryption: SMTPEncryption = .starttls,
+        verifyTLS: Bool = true,
         fromAddress: String = MailConfig.fromAddress,
         clientName: String = "swiftra.local"
     ) {
@@ -43,6 +45,7 @@ public struct SMTPMailer: Mailer {
         self.username = username
         self.password = password
         self.encryption = encryption
+        self.verifyTLS = verifyTLS
         self.fromAddress = fromAddress
         self.clientName = clientName
     }
@@ -54,20 +57,26 @@ public struct SMTPMailer: Mailer {
             username: MailConfig.smtpUsername,
             password: MailConfig.smtpPassword,
             encryption: SMTPEncryption(rawValue: MailConfig.smtpEncryption.lowercased()) ?? .starttls,
+            verifyTLS: MailConfig.smtpVerifyTLS,
             fromAddress: MailConfig.fromAddress
         )
     }
 
     public func send(to: String, subject: String, body: String, logger: Logger) async throws {
+        try await send(to: to, subject: subject, body: body, isHTML: false, logger: logger)
+    }
+
+    /// Envia com `Content-Type: text/html` quando `isHTML` é verdadeiro.
+    public func send(to: String, subject: String, body: String, isHTML: Bool, logger: Logger) async throws {
         let group = MultiThreadedEventLoopGroup.singleton
         let client = try await SMTPClient.connect(
-            host: host, port: port, encryption: encryption, clientName: clientName, group: group
+            host: host, port: port, encryption: encryption, verifyTLS: verifyTLS, clientName: clientName, group: group
         )
         do {
             if let username, let password {
                 try await client.authenticate(username: username, password: password)
             }
-            try await client.sendMail(from: fromAddress, to: to, subject: subject, body: body)
+            try await client.sendMail(from: fromAddress, to: to, subject: subject, body: body, isHTML: isHTML)
             try await client.quit()
         } catch {
             try? await client.close()
@@ -141,10 +150,17 @@ private final class SMTPClient: @unchecked Sendable {
         self.clientName = clientName
     }
 
+    private static func tlsConfiguration(verify: Bool) throws -> TLSConfiguration {
+        var configuration = TLSConfiguration.makeClientConfiguration()
+        configuration.certificateVerification = verify ? .fullVerification : .none
+        return configuration
+    }
+
     static func connect(
         host: String,
         port: Int,
         encryption: SMTPEncryption,
+        verifyTLS: Bool,
         clientName: String,
         group: EventLoopGroup
     ) async throws -> SMTPClient {
@@ -155,7 +171,7 @@ private final class SMTPClient: @unchecked Sendable {
                 let handlers: [ChannelHandler]
                 if encryption == .tls {
                     do {
-                        let context = try NIOSSLContext(configuration: .makeClientConfiguration())
+                        let context = try NIOSSLContext(configuration: tlsConfiguration(verify: verifyTLS))
                         handlers = [try NIOSSLClientHandler(context: context, serverHostname: host), handler]
                     } catch {
                         return channel.eventLoop.makeFailedFuture(error)
@@ -173,7 +189,7 @@ private final class SMTPClient: @unchecked Sendable {
             try await client.ehlo()
             if encryption == .starttls {
                 try await client.send("STARTTLS", expecting: "220")
-                let context = try NIOSSLContext(configuration: .makeClientConfiguration())
+                let context = try NIOSSLContext(configuration: tlsConfiguration(verify: verifyTLS))
                 let sslHandler = try NIOSSLClientHandler(context: context, serverHostname: host)
                 try await channel.pipeline.addHandler(sslHandler, position: .first).get()
                 try await client.ehlo()
@@ -200,7 +216,7 @@ private final class SMTPClient: @unchecked Sendable {
         _ = try await send(Data(password.utf8).base64EncodedString(), expecting: "235")
     }
 
-    func sendMail(from: String, to: String, subject: String, body: String) async throws {
+    func sendMail(from: String, to: String, subject: String, body: String, isHTML: Bool = false) async throws {
         _ = try await send("MAIL FROM:<\(from)>", expecting: "250")
         _ = try await send("RCPT TO:<\(to)>", expecting: "250")
         _ = try await send("DATA", expecting: "354")
@@ -210,7 +226,7 @@ private final class SMTPClient: @unchecked Sendable {
             "To: \(to)",
             "Subject: \(subject)",
             "MIME-Version: 1.0",
-            "Content-Type: text/plain; charset=utf-8",
+            "Content-Type: \(isHTML ? "text/html" : "text/plain"); charset=utf-8",
             "",
         ]
         let stuffedBody = body
