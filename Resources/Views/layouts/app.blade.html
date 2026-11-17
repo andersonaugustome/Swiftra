@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>@yield('title', 'Swiftra')</title>
+  <style>body{font-family:system-ui;max-width:760px;margin:4rem auto;padding:0 1rem}code{background:#f1f1f1;padding:.1rem .3rem;border-radius:.25rem}</style>
+  @stack('styles')
+</head>
+<body>
+  <main>
+    @yield('content')
+  </main>
+  <footer><small>Swiftra &middot; SwiftBlade</small></footer>
+  @stack('scripts')
+</body>
+</html>

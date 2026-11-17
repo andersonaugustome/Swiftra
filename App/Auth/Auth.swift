@@ -11,10 +11,33 @@ public enum Auth {
     public static func user() -> User? { AuthContext.user }
     public static func id() -> UUID? { AuthContext.user?.id }
     public static func check() -> Bool { AuthContext.user != nil }
+    public static func guest() -> Bool { AuthContext.user == nil }
 
     public static func requireUser() throws -> User {
         guard let user = AuthContext.user else { throw Abort(.unauthorized) }
         return user
+    }
+}
+
+/// Como `AuthMiddleware`, mas não rejeita convidados: apenas popula o
+/// contexto quando há um token válido (útil para conteúdo público/pessoal).
+public struct OptionalAuthMiddleware: AsyncMiddleware {
+    public init() {}
+
+    public func respond(to request: Request, chainingTo next: AsyncResponder) async throws -> Response {
+        guard let rawToken = request.headers.bearerAuthorization?.token,
+              let token = try? await AuthToken.on(request.db)
+                .where("token_hash", TokenGenerator.hash(rawToken))
+                .where("expires_at", ">", Date())
+                .first(),
+              let user = try? await User.find(token.userId, on: request.db) else {
+            return try await next.respond(to: request)
+        }
+        return try await AuthContext.$user.withValue(user) {
+            try await AuthContext.$token.withValue(token) {
+                try await next.respond(to: request)
+            }
+        }
     }
 }
 

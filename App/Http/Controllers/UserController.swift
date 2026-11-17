@@ -4,16 +4,25 @@ import Vapor
 public struct UserController: Controller {
     public init() {}
 
+    /// Lista paginada no formato do Laravel: `?page=1&per_page=15`.
     public func index(req: Request) async throws -> Response {
-        let users = try await User.orderBy("name").get()
-        return try await users.encodeResponse(for: req)
+        let page = max(req.query[Int.self, at: "page"] ?? 1, 1)
+        let perPage = min(max(req.query[Int.self, at: "per_page"] ?? 15, 1), 100)
+        let search = req.query[String.self, at: "search"]
+
+        var query = User.orderBy("name")
+        if let search, !search.isEmpty {
+            query = query.where("name", "like", search)
+        }
+        let users = try await query.paginate(page: page, perPage: perPage)
+        return try await users.map { UserResource($0) }.encodeResponse(for: req)
     }
 
     public func webIndex(req: Request) async throws -> Response {
         let users = try await User.orderBy("name").get()
         return try await view(
             "users.index",
-            compact("title", "Usuários", "users", users),
+            compact(("title", "Usuários"), ("users", users), ("total", users.count)),
             for: req
         )
     }
@@ -26,11 +35,11 @@ public struct UserController: Controller {
         }
         let user = User(name: input.name, email: input.email)
         try await user.save()
-        return try await user.encodeResponse(status: .created, for: req)
+        return try await UserResource(user).encodeResponse(status: .created, for: req)
     }
 
     public func show(req: Request) async throws -> Response {
-        try await find(req).encodeResponse(for: req)
+        try await UserResource(try await find(req)).encodeResponse(for: req)
     }
 
     public func update(req: Request) async throws -> Response {
@@ -43,7 +52,7 @@ public struct UserController: Controller {
         user.name = input.name
         user.email = input.email
         try await user.save()
-        return try await user.encodeResponse(for: req)
+        return try await UserResource(user).encodeResponse(for: req)
     }
 
     public func destroy(req: Request) async throws -> Response {

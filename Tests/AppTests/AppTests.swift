@@ -1,7 +1,52 @@
 import App
 import Fluent
+import Foundation
 import Testing
 import VaporTesting
+
+/// App de teste compartilhada: SQLite em memória + limites generosos
+/// (o rate limiter tem testes próprios, focados).
+func withSwiftraApp(_ test: (Application) async throws -> Void) async throws {
+    setenv("APP_ENV", "testing", 1)
+    setenv("RATE_LIMIT_AUTH_MAX", "1000", 1)
+    setenv("RATE_LIMIT_API_MAX", "1000", 1)
+    let app = try await Application.make(.testing)
+    try await configure(app)
+    try await app.autoMigrate()
+    defer { Task { try await app.asyncShutdown() } }
+    try await test(app)
+}
+
+/// Registra um usuário e devolve a sessão (access + refresh tokens).
+func registerSession(
+    on app: Application,
+    name: String = "Authenticated User",
+    email: String,
+    password: String = "secret123"
+) async throws -> AuthResponse {
+    let response = try await app.testing().sendRequest(.POST, "api/auth/register", beforeRequest: { request async throws in
+        try request.content.encode(RegisterInput(
+            name: name,
+            email: email,
+            password: password,
+            passwordConfirmation: password
+        ))
+    })
+    #expect(response.status == .created)
+    return try response.content.decode(AuthResponse.self)
+}
+
+func bearer(_ session: AuthResponse) -> HTTPHeaders {
+    var headers = HTTPHeaders()
+    headers.bearerAuthorization = .init(token: session.token)
+    return headers
+}
+
+func bearer(token: String) -> HTTPHeaders {
+    var headers = HTTPHeaders()
+    headers.bearerAuthorization = .init(token: token)
+    return headers
+}
 
 @Suite("Swiftra application")
 struct AppTests {
@@ -12,43 +57,65 @@ struct AppTests {
             #expect(response.status == .ok)
             #expect(response.body.string.contains("Swiftra"))
             #expect(response.body.string.contains("It works!"))
+            #expect(response.body.string.contains("alert-success"))
         }
     }
 
     @Test("Controller renders a view using compact data")
     func controllerView() async throws {
         try await withApp { app in
+            let user = User(name: "Blade User", email: "blade@example.com")
+            try await user.save(on: app.db)
+
             let response = try await app.testing().sendRequest(.GET, "users")
             #expect(response.status == .ok)
             #expect(response.body.string.contains("Usuários"))
-            #expect(response.body.string.contains("view(..., compact(...))"))
+            #expect(response.body.string.contains("Blade User"))
+            #expect(response.body.string.contains("blade@example.com"))
+            #expect(response.body.string.contains("1 usuário(s)"))
         }
     }
 
-    @Test("User CRUD")
+    @Test("User CRUD requires authentication and admin role to delete")
     func userCRUD() async throws {
         try await withApp { app in
-            let created = try await app.testing().sendRequest(.POST, "api/users", beforeRequest: { request async throws in
+            let anonymous = try await app.testing().sendRequest(.GET, "api/users")
+            #expect(anonymous.status == .unauthorized)
+
+            let session = try await registerSession(on: app, email: "crud@example.com")
+            let headers = bearer(session)
+
+            let created = try await app.testing().sendRequest(.POST, "api/users", headers: headers, beforeRequest: { request async throws in
                 try request.content.encode(UserInput(name: "Taylor", email: "taylor@example.com"))
             })
             #expect(created.status == .created)
-            let user = try created.content.decode(User.self)
-            let id = try #require(user.id)
+            let createdUser = try created.content.decode(UserResource.self)
+            let id = try #require(createdUser.id)
 
-            let response = try await app.testing().sendRequest(.GET, "api/users")
+            let response = try await app.testing().sendRequest(.GET, "api/users", headers: headers)
             #expect(response.status == .ok)
             #expect(response.body.string.contains("taylor@example.com"))
+            #expect(response.body.string.contains("\"current_page\":1"))
+            #expect(response.body.string.contains("\"total\":2"))
 
-            let shown = try await app.testing().sendRequest(.GET, "api/users/\(id)")
+            let shown = try await app.testing().sendRequest(.GET, "api/users/\(id)", headers: headers)
             #expect(shown.status == .ok)
 
-            let updated = try await app.testing().sendRequest(.PUT, "api/users/\(id)", beforeRequest: { request async throws in
+            let updated = try await app.testing().sendRequest(.PUT, "api/users/\(id)", headers: headers, beforeRequest: { request async throws in
                 try request.content.encode(UserInput(name: "Taylor Updated", email: "taylor@example.com"))
             })
             #expect(updated.status == .ok)
             #expect(updated.body.string.contains("Taylor Updated"))
 
-            let deleted = try await app.testing().sendRequest(.DELETE, "api/users/\(id)")
+            // Usuário comum não pode excluir.
+            let forbidden = try await app.testing().sendRequest(.DELETE, "api/users/\(id)", headers: headers)
+            #expect(forbidden.status == .forbidden)
+
+            // Admin pode.
+            let registeredUser = try #require(try await User.on(app.db).where("email", "crud@example.com").first())
+            _ = try await registeredUser.assignRole("admin", on: app.db)
+
+            let deleted = try await app.testing().sendRequest(.DELETE, "api/users/\(id)", headers: headers)
             #expect(deleted.status == .noContent)
         }
     }
@@ -100,6 +167,8 @@ struct AppTests {
             let registration = try registered.content.decode(AuthResponse.self)
             #expect(registration.tokenType == "Bearer")
             #expect(registration.user.email == "auth@example.com")
+            #expect(!registration.refreshToken.isEmpty)
+            #expect(registration.expiresIn > 0)
 
             let storedToken = try await AuthToken.query(on: app.db).first()
             #expect(storedToken?.tokenHash != registration.token)
@@ -133,12 +202,6 @@ struct AppTests {
     }
 
     private func withApp(_ test: (Application) async throws -> Void) async throws {
-        let app = try await Application.make(.testing)
-        app.databases.use(.sqlite(.memory), as: .sqlite)
-        try await configure(app)
-        app.databases.use(.sqlite(.memory), as: .sqlite)
-        try await app.autoMigrate()
-        defer { Task { try await app.asyncShutdown() } }
-        try await test(app)
+        try await withSwiftraApp(test)
     }
 }

@@ -2,7 +2,7 @@
 
 Swiftra é um scaffold de framework server-side escrito em Swift 6, construído sobre Vapor e Fluent. O projeto oferece uma organização familiar para aplicações web, rotas concisas, controllers assíncronos, views HTML, uma camada de consultas fluente, migrations, autenticação Bearer e CLI.
 
-> Estado atual: MVP funcional. A base compila e possui testes para views, CRUD, joins e autenticação. Consulte [Limitações atuais](#limitações-atuais) antes de adotá-la em produção.
+> Estado atual: scaffold completo inspirado no Laravel — SwiftBlade com layouts/diretivas/componentes, Eloquent com paginação/eager loading/soft deletes/factories e autenticação com refresh tokens, MFA, papéis e permissões. Veja [Limitações atuais](#limitações-atuais) para o que foi corrigido e as decisões conscientes do scaffold.
 
 ## Sumário
 
@@ -35,15 +35,16 @@ Swiftra é um scaffold de framework server-side escrito em Swift 6, construído 
 - `SwiftraRouter` com `get`, `post`, `put`, `delete`, `group` e `middleware`.
 - Controllers chamados diretamente nas rotas com verificação de tipos.
 - Helpers `view` e `compact`.
-- SwiftBlade com interpolação escapada `{{ variable }}` e nomes de view com pontos.
-- Fluent com uma API simplificada: `where`, `whereIn`, `orderBy`, `limit`, `find`, `first`, `firstOrFail`, `get`, `count`, `exists`, `save` e `delete`.
+- SwiftBlade com `{{ }}` escapado, `{!! !!}` cru, layouts (`@extends/@section/@yield`), `@if/@foreach/@forelse/@switch`, `@include`, componentes (`<x-...>` e `@component`), `@push/@stack`, `@auth/@guest`, `@csrf` e `@method`.
+- Fluent com API Eloquent: `where` (string, tipado e por key path), `whereIn`, `whereNull`, `whereBetween`, `orWhere`, `orderBy`, `limit`, `find`, `firstOrFail`, `get`, `count`, `exists`, `save`, `delete`, `chunk` e `when`.
+- Paginação no formato do Laravel (`paginate`/`simplePaginate`), eager loading declarativo (`with(\.$posts)`), soft deletes, factories e joins com até duas models relacionadas.
 - `join` e `leftJoin` com retorno das models participantes.
-- SQLite para desenvolvimento e testes.
-- MySQL por configuração de ambiente.
+- SQLite para desenvolvimento e testes; MySQL real na suíte de integração e no CI.
 - Migrations assíncronas.
-- Autenticação nativa com BCrypt, Bearer tokens, expiração e logout.
-- CLI com servidor, migrations, listagem de rotas e geradores.
-- CRUD JSON de `User` e relacionamento de exemplo com `Post`.
+- Autenticação com BCrypt, access tokens curtos configuráveis, refresh tokens rotativos com detecção de reuso, recuperação de senha, verificação de email, MFA TOTP e papéis/permissões.
+- Rate limiting configurável nos endpoints de autenticação e na API.
+- CLI com servidor, migrations, seed, listagem de rotas e geradores (controller, model, migration, factory).
+- CRUD JSON de `User` protegido por autenticação (exclusão exige papel `admin`) e relacionamento de exemplo com `Post`.
 
 ## Requisitos
 
@@ -103,6 +104,11 @@ Variáveis disponíveis:
 | `DB_DATABASE` | `swiftra` | Banco MySQL. |
 | `DB_USERNAME` | `root` | Usuário MySQL. |
 | `DB_PASSWORD` | vazio | Senha MySQL. |
+| `DB_TLS` | `disabled` | `required` exige TLS verificado no MySQL. |
+| `AUTH_ACCESS_TOKEN_TTL_MINUTES` | `60` | Vida do access token. |
+| `AUTH_REFRESH_TOKEN_TTL_DAYS` | `30` | Vida do refresh token. |
+| `AUTH_REQUIRE_VERIFIED_EMAIL` | `false` | Exige email verificado no login. |
+| `RATE_LIMIT_AUTH_MAX` / `RATE_LIMIT_API_MAX` | `10` / `120` | Tentativas por janela e IP. |
 
 O arquivo `.env` está ignorado pelo Git. Não publique credenciais reais.
 
@@ -150,12 +156,16 @@ DB_USERNAME=root
 DB_PASSWORD=sua_senha
 ```
 
+Opcionalmente, suba um MySQL local com `docker compose up -d mysql`. `DB_TLS=disabled` (padrão) atende servidores locais/docker; em produção use `DB_TLS=required` com certificado válido.
+
 Execute as migrations e inicie o servidor:
 
 ```bash
 swift run Swiftra migrate
 swift run Swiftra serve
 ```
+
+Para validar contra o servidor real, `./scripts/test-mysql.sh` roda a suíte de integração (banco `swiftra_test`, usuário `DB_USERNAME`/`DB_PASSWORD` do ambiente).
 
 Models, consultas, joins, autenticação e migrations usam Fluent. Os controllers não precisam ser modificados ao trocar SQLite por MySQL.
 
@@ -166,14 +176,14 @@ Durante os testes, a aplicação força SQLite em memória, independentemente do
 ```text
 .
 ├── App/
-│   ├── Auth/                  # Contexto e middleware de autenticação
+│   ├── Auth/                  # Auth, tokens, MFA TOTP, papéis/permissões, rate limiting
 │   ├── Console/               # Comandos da CLI
 │   ├── Database/              # Camada Eloquent e contexto de banco
 │   ├── Http/Controllers/      # Controllers HTTP
 │   ├── Models/                # Models Fluent
 │   ├── Routing/               # SwiftraRouter e adaptação de controllers
 │   ├── Support/               # .env, view e compact
-│   ├── Views/                 # Engine SwiftBlade
+│   ├── Views/                 # Engine SwiftBlade (parser, expressões, layouts)
 │   └── configure.swift        # Configuração central
 ├── Config/                    # Configurações versionadas
 ├── Database/Migrations/       # Migrations
@@ -352,15 +362,52 @@ O nome `users.index` resolve para:
 Resources/Views/users/index.blade.html
 ```
 
-`compact` possui overloads para um, dois ou três pares chave/valor:
+`compact` não tem limite de pares. Formas aceitas:
 
 ```swift
 compact("user", user)
-compact("title", title, "user", user)
-compact("title", title, "user", user, "active", true)
+compact("title", title, "user", user, "active", true)   // overloads posicionais (até 6)
+// Ilimitada, recomendada:
+compact(("title", "Usuários"), ("users", users), ("total", total))
+// Ou o atalho estilo Laravel:
+view("users.index", with: ["users": users], for: req)
 ```
 
-Valores interpolados são escapados para HTML (`&`, `<`, `>`, aspas simples e duplas). Uma chave ausente resulta em string vazia.
+Valores interpolados com `{{ }}` são escapados para HTML; `{!! !!}` imprime sem escapar. Uma chave ausente resulta em string vazia.
+
+### Diretivas do SwiftBlade
+
+```blade
+@extends('layouts.app')
+
+@section('content')
+  @if(user) Olá, {{ user.name }} @else Convidado @endif
+  @foreach(users as user)
+    {{ loop.iteration }}. {{ user.name }} ({{ user.email }})
+  @empty
+    Nenhum usuário.
+  @endforeach
+  @include('partials.footer')
+  <x-alert type="success">Salvo!</x-alert>
+@endsection
+```
+
+Suportadas: `@swift` (declarações `let`/`var` no template), `@if/@elseif/@else`, `@unless`, `@isset`, `@empty`, `@foreach` (`users as user`, `key => user` ou `user in users`, com `loop.index/iteration/first/last/count`), `@forelse`, `@switch/@case/@default/@break`, `@break/@continue`, `@extends/@section/@yield/@parent`, `@include` (com dados extras), `@component`, `<x-nome>` com atributos (`:prop` amarrado) e `<x-slot>`, `@push/@stack`, `@auth/@guest`, `@csrf`, `@method('PUT')`, comentários `{{-- --}}` e `@verbatim`. Expressões aceitam comparações, `&&`/`||`/`!`, `??`, ternário, funções como `count()`, `upper()` e `isset()` e métodos sobre valores (`user.name.uppercased()`, `items.count()`, `tags.join(', ')`, encadeados). `@parent` funciona em cadeias de layouts com qualquer profundidade.
+
+Código no template usa a sintaxe Swift, sem `$` nem PHP:
+
+```blade
+@swift
+  let total = count(users)
+  var titulo = "Usuários"
+@endswift
+
+<h1>{{ titulo }}</h1>
+<p>{{ total }} registro(s).</p>
+
+{{-- Forma curta, em uma linha: --}}
+@swift(let dobro = total * 2)
+```
 
 ## Models e Eloquent
 
@@ -370,22 +417,25 @@ Uma model implementa `EloquentModel` e pode também implementar `Content` para e
 import Fluent
 import Vapor
 
-final class Post: EloquentModel, Content, @unchecked Sendable {
+final class Post: SoftDeletableModel, Content, @unchecked Sendable {
     static let schema = "posts"
 
     @ID(key: .id) var id: UUID?
-    @Field(key: "user_id") var userId: UUID
+    @Parent(key: "user_id") var user: User          // relação declarativa
     @Field(key: "title") var title: String
     @Timestamp(key: "created_at", on: .create) var createdAt: Date?
+    @Timestamp(key: "deleted_at", on: .delete) var deletedAt: Date?
 
     init() {}
 
     init(id: UUID? = nil, userId: UUID, title: String) {
         self.id = id
-        self.userId = userId
+        self.$user.id = userId
         self.title = title
     }
 }
+
+// Em User:  @Children(for: \Post.$user) var posts: [Post]
 ```
 
 ### Consultas dentro de requests
@@ -436,7 +486,14 @@ Operadores aceitos:
 | `like` | Contém |
 | `not like` | Não contém |
 
-Operadores desconhecidos causam falha de precondição. As direções de ordenação aceitas são `asc`, `ascending`, `desc` e `descending`.
+Operadores desconhecidos, colunas inválidas e direções inválidas **não** derrubam o processo: a query registra um `EloquentError` e o primeiro método terminal (`get`, `first`, `count`, `paginate`...) o lança. Para verificação em compilação, use os operadores tipados ou key paths:
+
+```swift
+User.where("email", .equal, email)     // QueryOperator
+User.where(\.$email, email)           // key path Fluent
+```
+
+As direções aceitas são `asc`, `ascending`, `desc`, `descending` — ou `SortDirection` / `.descending` tipados.
 
 ### Where in
 
@@ -486,6 +543,52 @@ let user = try await User.query()
     .first()
 ```
 
+### Paginação
+
+```swift
+let page = try await User.orderBy("name").paginate(page: 1, perPage: 15)
+// Paginator<User>: data, current_page, per_page, total, last_page,
+// from, to, has_more_pages  (formato do LengthAwarePaginator)
+
+let simple = try await User.simplePaginate(page: 1, perPage: 15) // sem count
+```
+
+`GET /api/users?page=1&per_page=15&search=ana` usa essa paginação.
+
+### Eager loading e relações declarativas
+
+```swift
+let users = try await User.with(\.$posts).get()        // sem N+1
+let post = try await Post.with(\.$user).firstOrFail()
+```
+
+### Soft deletes
+
+Models `SoftDeletableModel` (com `@Timestamp(key: "deleted_at", on: .delete)`) somem das consultas ao apagar. Use `withTrashed()`, `onlyTrashed()`, `restore()`/`restoreAll()` e `forceDelete()` para o ciclo completo.
+
+### Factories
+
+```swift
+let users = try await UserFactory().count(3).createMany(on: database)
+let admin = try await UserFactory().state { $0.name = "Admin" }.create(on: database)
+```
+
+Crie novas com `swift run Swiftra make:factory NomeFactory`.
+
+### Relações polimórficas
+
+```swift
+MorphRegistry.register(User.self) // em configure.swift
+
+let comments = try await post.morphMany(Comment.self, on: database)
+let parent = try await comment.morphParent(Post.self, on: database)
+let anyParent = try await comment.morphParent(on: database) // via registro
+```
+
+### Acesso total ao Fluent
+
+`query.fluentQuery` expõe o `QueryBuilder` do Fluent — toda a API dele (`group`, `set`, aggregates...) continua acessível quando a camada Eloquent não basta.
+
 ## Joins
 
 Swift precisa conhecer o tipo da tabela relacionada. Por isso, a model associada é o primeiro argumento.
@@ -527,7 +630,7 @@ for row in rows {
 }
 ```
 
-`getJoined` retorna `[JoinedRow<Base, Joined>]`. `getJoinedOptional` retorna `[OptionalJoinedRow<Base, Joined>]` e é apropriado para `leftJoin`.
+`getJoined` retorna `[JoinedRow<Base, Joined>]`. `getJoinedOptional` retorna `[OptionalJoinedRow<Base, Joined>]` e é apropriado para `leftJoin`. Com dois joins, `getJoined(Post.self, Category.self)` retorna `JoinedRow3` (e `getJoinedOptional` a variante opcional).
 
 Se somente a model principal for necessária, finalize a consulta com `.get()`.
 
@@ -577,21 +680,32 @@ O comando `make:migration` cria o arquivo, mas não o registra automaticamente e
 
 ## Autenticação
 
-A autenticação usa duas tabelas separadas da tabela `users`:
+Tabelas separadas da tabela `users`:
 
-- `user_credentials`: hash BCrypt da senha por usuário.
-- `auth_tokens`: SHA-256 do token, usuário, expiração e criação.
+- `user_credentials`: hash BCrypt da senha, segredo TOTP e códigos de recuperação (hashes).
+- `auth_tokens`: SHA-256 do access token, usuário e expiração.
+- `refresh_tokens`: SHA-256 do refresh token, com família, revogação e detecção de reuso.
+- `password_reset_tokens`, `email_verification_tokens`, `mfa_challenges`: tokens de uso único com expiração.
+- `roles`, `permissions` e pivôs `user_roles`, `role_permissions`, `user_permissions`.
 
-O token em texto puro é retornado apenas ao registrar ou autenticar. Tokens possuem 256 bits aleatórios, expiram em 30 dias e são removidos no logout.
+Tokens possuem 256 bits aleatórios. O access token vive `AUTH_ACCESS_TOKEN_TTL_MINUTES` (padrão 60) e o refresh, `AUTH_REFRESH_TOKEN_TTL_DAYS` (padrão 30) — nada fixo no código. Só hashes são persistidos; o texto puro aparece uma única vez na resposta. Endpoints públicos de autenticação têm rate limiting (`RATE_LIMIT_AUTH_MAX` por `RATE_LIMIT_AUTH_DECAY_SECONDS`, por IP, com `429` + `Retry-After`).
 
 ### Endpoints
 
 | Método | Endpoint | Protegido | Sucesso |
 |---|---|---:|---:|
-| `POST` | `/api/auth/register` | Não | `201 Created` |
-| `POST` | `/api/auth/login` | Não | `200 OK` |
+| `POST` | `/api/auth/register` | Não (throttle) | `201 Created` |
+| `POST` | `/api/auth/login` | Não (throttle) | `200 OK` ou desafio MFA |
+| `POST` | `/api/auth/refresh` | Refresh token | `200 OK` (rotaciona) |
+| `POST` | `/api/auth/forgot-password` | Não (throttle) | `200 OK` (sempre genérico) |
+| `POST` | `/api/auth/reset-password` | Token do email | `200 OK` |
+| `POST` | `/api/auth/verify-email` | Token do email | `200 OK` |
+| `POST` | `/api/auth/mfa/challenge` | Desafio + TOTP | `200 OK` |
 | `GET` | `/api/auth/me` | Bearer | `200 OK` |
 | `POST` | `/api/auth/logout` | Bearer | `204 No Content` |
+| `POST` | `/api/auth/logout-all` | Bearer | `204 No Content` |
+| `POST` | `/api/auth/email/resend-verification` | Bearer | `200 OK` |
+| `POST` | `/api/auth/mfa/setup` · `enable` · `disable` | Bearer | segredo/códigos/`204` |
 
 ### Registro
 
@@ -620,17 +734,22 @@ Resposta de sucesso:
 
 ```json
 {
-  "token": "TOKEN_EM_TEXTO_PURO",
-  "tokenType": "Bearer",
-  "expiresAt": "DATA_DE_EXPIRACAO",
-  "user": {
-    "id": "UUID",
-    "name": "Taylor",
-    "email": "taylor@example.com",
-    "createdAt": "DATA_DE_CRIACAO",
-    "updatedAt": null
-  }
+  "token": "ACCESS_TOKEN",
+  "token_type": "Bearer",
+  "expires_at": "DATA_DE_EXPIRACAO",
+  "expires_in": 3600,
+  "refresh_token": "REFRESH_TOKEN",
+  "refresh_expires_at": "DATA_DE_EXPIRACAO_DO_REFRESH",
+  "user": { "id": "UUID", "name": "Taylor", "email": "taylor@example.com" }
 }
+```
+
+Uso do refresh (o token antigo é invalidado; reutilizá-lo revoga a família inteira):
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/auth/refresh \
+  -H 'content-type: application/json' \
+  -d '{"refresh_token":"REFRESH_TOKEN"}'
 ```
 
 ### Login
@@ -657,7 +776,26 @@ curl -X POST http://127.0.0.1:8080/api/auth/logout \
   -H 'authorization: Bearer SEU_TOKEN'
 ```
 
-Após o `204`, o mesmo token retorna `401` em rotas protegidas. Outros tokens emitidos para o usuário continuam válidos.
+Após o `204`, o mesmo token retorna `401` em rotas protegidas. `logout` aceita um corpo opcional `{"refresh_token": "..."}` para encerrar também a sessão longa; `logout-all` revoga todos os dispositivos. Redefinir a senha também revoga todas as sessões.
+
+### Recuperação de senha, verificação de email e MFA
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/auth/forgot-password \
+  -H 'content-type: application/json' -d '{"email":"taylor@example.com"}'
+# O link vai pelo mailer configurado (MAIL_MAILER=log ou smtp). Em APP_ENV=testing a resposta
+# inclui reset_token, como um mail catcher local.
+
+curl -X POST http://127.0.0.1:8080/api/auth/reset-password \
+  -H 'content-type: application/json' \
+  -d '{"token":"TOKEN","email":"taylor@example.com","password":"new-secret-1","password_confirmation":"new-secret-1"}'
+```
+
+O registro cria um token de verificação de email (mailer log por padrão). Com `AUTH_REQUIRE_VERIFIED_EMAIL=true`, o login exige `POST /api/auth/verify-email` concluído. O MFA é TOTP (RFC 6238, compatível com autenticadores comuns): `mfa/setup` devolve segredo + `otpauth_uri`, `mfa/enable` confirma com um código e emite 8 códigos de recuperação de uso único; no login seguinte, a resposta traz `mfa_required` + `challenge_token` para `POST /api/auth/mfa/challenge`.
+
+### Papéis e permissões
+
+O registro atribui o papel `AUTH_DEFAULT_ROLE` (padrão `user`); `swift run Swiftra db:seed` cria `admin` (todas) e `user` e as permissões `users.*`/`posts.*`. Na model: `user.hasRole("admin", on:)`, `user.can("users.delete", on:)`, `assignRole`, `givePermissionTo`. Em rotas: `RequireRoleMiddleware("admin")`, `RequirePermissionMiddleware("users.delete")` e `EnsureEmailVerifiedMiddleware()`.
 
 ### Helper Auth
 
@@ -727,6 +865,8 @@ Execute comandos com `swift run Swiftra <comando>`.
 | `make:controller NomeController` | Cria um controller básico. |
 | `make:model Nome` | Cria uma model `EloquentModel`. |
 | `make:migration Nome` | Cria uma migration vazia. |
+| `make:factory NomeFactory` | Cria uma factory de model. |
+| `db:seed` | Cria papéis/permissões padrão (admin/user). |
 
 Exemplos:
 
@@ -739,13 +879,15 @@ swift run Swiftra migrate --revert
 swift run Swiftra make:controller PostController
 swift run Swiftra make:model Category
 swift run Swiftra make:migration CreateCategories
+swift run Swiftra make:factory PostFactory
+swift run Swiftra db:seed
 ```
 
 Os geradores não sobrescrevem arquivos existentes. O controller gerado é um esqueleto básico; adicione conformidade a `Controller` e `init()` quando quiser registrá-lo pelo helper `controller(...)`. A migration gerada precisa ser registrada manualmente.
 
 ## API de exemplo
 
-O projeto inclui um CRUD JSON de usuários. Essas rotas são públicas no scaffold atual.
+O projeto inclui um CRUD JSON de usuários **protegido**: todas as rotas exigem Bearer token e a exclusão exige o papel `admin` (usuário comum recebe `403`). A listagem é paginada (`?page=`, `?per_page=`, `?search=`).
 
 | Método | Endpoint | Ação | Resposta principal |
 |---|---|---|---:|
@@ -758,7 +900,9 @@ O projeto inclui um CRUD JSON de usuários. Essas rotas são públicas no scaffo
 Criar:
 
 ```bash
+# Todas as chamadas usam: -H 'authorization: Bearer [REDACTED]'
 curl -X POST http://127.0.0.1:8080/api/users \
+  -H 'authorization: Bearer [REDACTED]' \
   -H 'content-type: application/json' \
   -d '{"name":"Taylor","email":"taylor@example.com"}'
 ```
@@ -766,7 +910,8 @@ curl -X POST http://127.0.0.1:8080/api/users \
 Listar:
 
 ```bash
-curl http://127.0.0.1:8080/api/users
+curl 'http://127.0.0.1:8080/api/users?page=1&per_page=15' \
+  -H 'authorization: Bearer [REDACTED]'
 ```
 
 Exibir:
@@ -799,13 +944,21 @@ Execute:
 swift test
 ```
 
-A suíte usa Swift Testing, `VaporTesting` e SQLite em memória. Ela cobre:
+A suíte usa Swift Testing, `VaporTesting` e SQLite em memória (19 testes). Ela cobre:
 
-- Renderização da página inicial.
-- Controller retornando view com `compact`.
-- CRUD completo de `User`.
-- `inner join` e `left join` entre `User` e `Post`.
-- Registro, login, senha inválida, rota protegida, logout e token revogado.
+- SwiftBlade: escape/raw, condicionais, loops com `loop.*`, switch, layouts/seções/stacks, includes, componentes em disco, `compact` ilimitado e vetores oficiais de SHA-1/TOTP.
+- Controller retornando view com `compact` e `@forelse` iterando usuários reais.
+- CRUD de `User` autenticado, paginado e com exclusão restrita a `admin`.
+- Eloquent: erros tipados sem crash, operadores/key paths, paginação, eager loading, soft deletes, factories, `whereIn/pluck/whereNull` e rate limiter.
+- Autenticação: registro/login/logout, rotação de refresh com detecção de reuso, reset de senha, verificação de email, MFA completo e papéis/permissões.
+
+Integração MySQL real (migrations, auth, CRUD, joins e paginação contra MySQL 8.4):
+
+```bash
+./scripts/test-mysql.sh   # usa DB_* do ambiente; sobe docker compose se preciso
+```
+
+Sem `SWIFTRA_MYSQL_TEST=1` essa suíte é ignorada. O CI (`.github/workflows/ci.yml`) roda a suíte SQLite e um job separado contra MySQL 8.4.
 
 Estrutura recomendada para novos testes:
 
@@ -831,11 +984,11 @@ Antes de publicar:
 3. Execute migrations como uma etapa controlada do deploy.
 4. Coloque o servidor atrás de um proxy com TLS.
 5. Defina `APP_HOST` e `APP_PORT` de acordo com a infraestrutura.
-6. Adicione rate limiting aos endpoints de registro e login.
+6. Ajuste `RATE_LIMIT_*` e `AUTH_*_TTL_*` ao seu caso; mantenha `RATE_LIMIT_DRIVER=database` em produção com várias instâncias.
 7. Adicione observabilidade, política de logs e monitoramento.
-8. Planeje limpeza periódica de tokens expirados.
-9. Revise quais rotas devem usar `AuthMiddleware`; o CRUD de exemplo é público.
-10. Execute testes contra o banco e o sistema operacional usados em produção.
+8. Planeje limpeza periódica de tokens expirados/revogados e de `rate_limit_entries` expiradas.
+9. Configure email real (`MAIL_MAILER=smtp`, `MAIL_HOST`, credenciais) e `DB_TLS=required` com certificado válido.
+10. Execute `./scripts/test-mysql.sh` e os testes no sistema operacional de produção.
 
 ## Solução de problemas
 
@@ -898,19 +1051,33 @@ Authorization: Bearer SEU_TOKEN
 
 ## Limitações atuais
 
-- SwiftBlade suporta apenas interpolação `{{ chave }}`; ainda não possui layouts, diretivas, loops, condicionais, includes ou componentes.
-- Coleções interpoladas em SwiftBlade são convertidas por descrição textual; ainda não existe uma diretiva de iteração no template.
-- `compact` aceita no máximo três pares chave/valor.
-- A API Eloquent cobre operações comuns, mas não substitui toda a API do Fluent.
-- Nomes de colunas e operadores em consultas string-based são verificados em execução, não em compilação.
-- Operador ou direção inválidos encerram a execução por precondição.
-- `getJoined` e `getJoinedOptional` trabalham com uma model relacionada por leitura.
-- Não há paginação, eager loading simplificado, relações declarativas, soft deletes ou factories na camada Eloquent atual.
-- Não há refresh tokens, recuperação de senha, confirmação de email, autenticação multifator, papéis ou permissões.
-- O prazo do token está fixado em 30 dias no código.
-- Não há rate limiting nos endpoints de autenticação.
-- O CRUD `/api/users` é público no scaffold de exemplo.
-- O suporte MySQL compila com o driver oficial, mas esta suíte não executa contra um servidor MySQL real.
+Nenhuma limitação funcional aberta no escopo do scaffold. Os pontos que
+existiam nas primeiras versões foram corrigidos:
+
+- **SwiftBlade completo**: layouts multinível com `@parent` encadeado, `@swift`
+  com atribuições, métodos sobre valores (`user.name.uppercased()`,
+  `items.count()`, `tags.join(', ')`, chamadas encadeadas) e todas as
+  diretivas de loop/condição/include/componente.
+- **Colunas e operadores**: além das strings (validadas com `EloquentError`,
+  sem derrubar o processo), há superfície totalmente tipada — `QueryOperator`,
+  `SortDirection` e overloads por key path para `where/whereIn/whereNotIn/
+  whereNull/whereNotNull/whereBetween/whereColumn/orderBy`.
+- **Relações polimórficas**: `morphMany`/`morphTo` com registro de tipos
+  (`MorphRegistry`), exemplificadas por `Comment` sobre `User`/`Post`.
+- **Rate limiting compartilhado**: driver `database` por padrão
+  (`rate_limit_entries`, válido entre instâncias); `memory` segue disponível
+  para processo único/testes via `RATE_LIMIT_DRIVER`.
+- **Email real**: `MAIL_MAILER=smtp` usa o `SMTPMailer` (NIO + NIOSSL, com
+  `none`/`starttls`/`tls` e `AUTH LOGIN`); `log` continua como padrão de
+  desenvolvimento.
+- **MySQL no fluxo padrão**: `make test` roda a suíte SQLite e, havendo
+  MySQL acessível, a integração real; o CI executa o job MySQL 8.4 em todo
+  push/PR mesmo sem servidor local.
+
+Decisões conscientes que permanecem (não são defeitos): expressões Blade não
+não são PHP: o bloco de código do template é o `@swift`, com declarações
+`let`/`var` e expressões SwiftBlade, no espírito da linguagem do framework e consultas string-based são validadas em execução como no
+próprio Laravel — a verificação em compilação está nas variantes tipadas.
 
 ## Validação do scaffold
 
@@ -922,4 +1089,4 @@ swift test
 .build/debug/Swiftra route:list
 ```
 
-Os testes locais validam o comportamento com SQLite em memória. Eles não comprovam conectividade, migrations ou comportamento de um servidor MySQL externo.
+Os testes locais validam o comportamento com SQLite em memória e, com `SWIFTRA_MYSQL_TEST=1`, também contra um MySQL real (validado localmente contra MySQL 8.4.11 e no CI).

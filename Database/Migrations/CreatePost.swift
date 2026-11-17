@@ -9,6 +9,7 @@ public struct CreatePost: AsyncMigration {
             .field("user_id", .uuid, .required, .references(User.schema, "id", onDelete: .cascade))
             .field("title", .string, .required)
             .field("created_at", .datetime)
+            .field("deleted_at", .datetime)
             .create()
     }
 

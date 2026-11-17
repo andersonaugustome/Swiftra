@@ -6,6 +6,39 @@ public func registerCommands(_ app: Application) {
     app.asyncCommands.use(MakeControllerCommand(), as: "make:controller")
     app.asyncCommands.use(MakeModelCommand(), as: "make:model")
     app.asyncCommands.use(MakeMigrationCommand(), as: "make:migration")
+    app.asyncCommands.use(MakeFactoryCommand(), as: "make:factory")
+    app.asyncCommands.use(SeedCommand(), as: "db:seed")
+}
+
+struct SeedCommand: AsyncCommand {
+    struct Signature: CommandSignature {}
+    var help: String { "Seed authorization roles and permissions" }
+
+    func run(using context: CommandContext, signature: Signature) async throws {
+        try await AuthorizationSeeder.seed(on: context.application.db, logger: context.application.logger)
+        context.console.success("Seeded roles (admin, user) and permissions")
+    }
+}
+
+struct MakeFactoryCommand: AsyncCommand {
+    typealias Signature = NameSignature
+    var help: String { "Create a model factory in App/Database/Factories" }
+
+    func run(using context: CommandContext, signature: Signature) async throws {
+        let base = sanitized(signature.name).replacingOccurrences(of: "Factory", with: "")
+        let name = base + "Factory"
+        let contents = """
+        import Foundation
+
+        final class \(name): ModelFactory<\(base)> {
+            override func definition() -> \(base) {
+                // Defina os atributos falsos da model aqui.
+                \(base)()
+            }
+        }
+        """
+        try create(contents, at: "App/Database/\(name).swift", console: context.console)
+    }
 }
 
 struct RouteListCommand: AsyncCommand {
